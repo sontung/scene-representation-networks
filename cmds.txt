@@ -1,0 +1,1 @@
+python train_pbw.py --data_root cars_train_val --val_root cars_train_val --logging_root logs

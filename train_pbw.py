@@ -18,14 +18,14 @@ p.add('-c', '--config_filepath', required=False, is_config_file=True, help='Path
 
 # Multi-resolution training: Instead of passing only a single value, each of these command-line arguments take comma-
 # separated lists. If no multi-resolution training is required, simply pass single values (see default values).
-p.add_argument('--img_sidelengths', type=str, default='64', required=False,
+p.add_argument('--img_sidelengths', type=str, default='128', required=False,
                help='Progression of image sidelengths.'
                     'If comma-separated list, will train on each sidelength for respective max_steps.'
                     'Images are downsampled to the respective resolution.')
 p.add_argument('--max_steps_per_img_sidelength', type=str, default="200000",
                help='Maximum number of optimization steps.'
                     'If comma-separated list, is understood as steps per image_sidelength.')
-p.add_argument('--batch_size_per_img_sidelength', type=str, default="8",
+p.add_argument('--batch_size_per_img_sidelength', type=str, default="3",
                help='Training batch size.'
                     'If comma-separated list, will train each image sidelength with respective batch size.')
 
@@ -101,12 +101,7 @@ def train():
     batch_size_per_sidelength = util.parse_comma_separated_integers(opt.batch_size_per_img_sidelength)
     max_steps_per_sidelength = util.parse_comma_separated_integers(opt.max_steps_per_img_sidelength)
 
-    train_dataset = dataio.SceneClassDataset(root_dir=opt.data_root,
-                                             max_num_instances=opt.max_num_instances_train,
-                                             max_observations_per_instance=opt.max_num_observations_train,
-                                             img_sidelength=img_sidelengths[0],
-                                             specific_observation_idcs=specific_observation_idcs,
-                                             samples_per_instance=1)
+    train_dataset = dataio.PBWDataset(train=True)
 
     assert (len(img_sidelengths) == len(batch_size_per_sidelength)), \
         "Different number of image sidelengths passed than batch sizes."
@@ -116,14 +111,9 @@ def train():
     if not opt.no_validation:
         assert (opt.val_root is not None), "No validation directory passed."
 
-        val_dataset = dataio.SceneClassDataset(root_dir=opt.val_root,
-                                               max_num_instances=opt.max_num_instances_val,
-                                               max_observations_per_instance=opt.max_num_observations_val,
-                                               img_sidelength=img_sidelengths[0],
-                                               samples_per_instance=1)
-        collate_fn = val_dataset.collate_fn
+        val_dataset = dataio.PBWDataset(train=False)
         val_dataloader = DataLoader(val_dataset,
-                                    batch_size=2,
+                                    batch_size=16,
                                     shuffle=False,
                                     drop_last=True,
                                     collate_fn=val_dataset.collate_fn)
@@ -174,23 +164,22 @@ def train():
         print("\n" + "#" * 10)
         print("Training with sidelength %d for %d steps with batch size %d" % (img_sidelength, max_steps, batch_size))
         print("#" * 10 + "\n")
-        train_dataset.set_img_sidelength(img_sidelength)
 
         # Need to instantiate DataLoader every time to set new batch size.
         train_dataloader = DataLoader(train_dataset,
                                       batch_size=batch_size,
                                       shuffle=True,
                                       drop_last=True,
-                                      collate_fn=train_dataset.collate_fn,
-                                      pin_memory=opt.preload)
+                                      collate_fn=train_dataset.collate_fn,)
 
         cum_max_steps += max_steps
 
         # Loops over epochs.
         while True:
-            for model_input, ground_truth in train_dataloader:
-                print(model_input["uv"].size())
-                print(model_input["uv"])
+            for batch in train_dataloader:
+                rgb, ext_mat, info = batch
+                ground_truth = {"rgb": rgb}
+                model_input = (ext_mat, info) # color, pix coord, location, box
                 model_outputs = model(model_input)
                 optimizer.zero_grad()
 
@@ -209,9 +198,9 @@ def train():
                 total_loss.backward()
 
                 optimizer.step()
-
-                print("Iter %07d   Epoch %03d   L_img %0.4f   L_latent %0.4f   L_depth %0.4f" %
-                      (iter, epoch, weighted_dist_loss, weighted_latent_loss, weighted_reg_loss))
+                if iter % 1000:
+                    print("Iter %07d   Epoch %03d   L_img %0.4f   L_latent %0.4f   L_depth %0.4f" %
+                          (iter, epoch, weighted_dist_loss, weighted_latent_loss, weighted_reg_loss))
 
                 model.write_updates(writer, model_outputs, ground_truth, iter)
                 writer.add_scalar("scaled_distortion_loss", weighted_dist_loss, iter)
@@ -221,27 +210,8 @@ def train():
 
                 if iter % opt.steps_til_val == 0 and not opt.no_validation:
                     print("Running validation set...")
-
-                    model.eval()
-                    with torch.no_grad():
-                        psnrs = []
-                        ssims = []
-                        dist_losses = []
-                        for model_input, ground_truth in val_dataloader:
-                            model_outputs = model(model_input)
-
-                            dist_loss = model.get_image_loss(model_outputs, ground_truth).cpu().numpy()
-                            psnr, ssim = model.get_psnr(model_outputs, ground_truth)
-                            psnrs.append(psnr)
-                            ssims.append(ssim)
-                            dist_losses.append(dist_loss)
-
-                            model.write_updates(writer, model_outputs, ground_truth, iter, prefix='val_')
-
-                        writer.add_scalar("val_dist_loss", np.mean(dist_losses), iter)
-                        writer.add_scalar("val_psnr", np.mean(psnrs), iter)
-                        writer.add_scalar("val_ssim", np.mean(ssims), iter)
-                    model.train()
+                    acc = test(model, val_dataloader)
+                    print("Accuracy:", acc)
 
                 iter += 1
                 step += 1
@@ -264,6 +234,44 @@ def train():
                      discriminator=None,
                      optimizer=optimizer)
 
+def test(model_, loader_):
+    model_.eval()
+    acc = 0.0
+    nb_samples = 0
+    with torch.no_grad():
+        for batch in loader_:
+            rgb, ext_mat, info = batch
+            model_input = (ext_mat, info)  # color, pix coord, location, box
+
+            all_arrangements = []
+            all_uv = []
+            for scene in info:
+                true_obj_arrangement = [(obj[0], obj[1]) for obj in scene]
+                uv = [obj[1][:2] for obj in scene]
+                all_arrangements.append(true_obj_arrangement)
+                all_uv.append(uv)
+
+            world_coords = model_.return_world_coords(torch.tensor(all_uv), model_input)
+
+            for i in range(len(all_arrangements)):
+                scene = all_arrangements[i]
+                pred_wc = world_coords[i]
+                true = []
+                pred = []
+                all_arr = []
+                for j, obj in enumerate(scene):
+                    true.append(obj[1][-1])
+                    pred.append(pred_wc[j][2].item())
+                    all_arr.append((obj[0], obj[1][-1], pred_wc[j][2].item()))
+                # print("true:", sorted(all_arr, key=lambda du: du[1]), "\npred:",
+                #       sorted(all_arr, key=lambda du: du[2]))
+                true_rel = sorted(all_arr, key=lambda du: du[1])
+                pred_rel = sorted(all_arr, key=lambda du: du[2])
+                if true_rel == pred_rel:
+                    acc +=1
+                nb_samples += 1
+    model_.train()
+    return acc / nb_samples
 
 def main():
     train()

@@ -6,6 +6,7 @@ from pytorch_prototyping import pytorch_prototyping
 
 import torch
 from torch import nn
+import GPUtil
 
 
 def init_recurrent_weights(self):
@@ -80,7 +81,7 @@ class Raymarcher(nn.Module):
         self.counter = 0
 
     def forward(self,
-                cam2world,
+                cam2world,  # pose
                 phi,
                 uv,
                 intrinsics):
@@ -97,11 +98,13 @@ class Raymarcher(nn.Module):
                                                          intrinsics=intrinsics,
                                                          cam2world=cam2world)
 
+
         world_coords = [init_world_coords]
         depths = [initial_depth]
         states = [None]
 
         for step in range(self.steps):
+
             v = phi(world_coords[-1])
 
             state = self.lstm(v.view(-1, self.n_feature_channels), states[-1])
@@ -117,10 +120,9 @@ class Raymarcher(nn.Module):
 
             depth = geometry.depth_from_world(world_coords[-1], cam2world)
 
-            if self.training:
-                print("Raymarch step %d: Min depth %0.6f, max depth %0.6f" %
-                      (step, depths[-1].min().detach().cpu().numpy(), depths[-1].max().detach().cpu().numpy()))
-
+            # if self.training:
+            #     print("Raymarch step %d/%d: Min depth %0.6f, max depth %0.6f" %
+            #           (step, self.steps, depths[-1].min().detach().cpu().numpy(), depths[-1].max().detach().cpu().numpy()))
             depths.append(depth)
 
         if not self.counter % 100:

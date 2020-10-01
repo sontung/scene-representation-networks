@@ -1,3 +1,10 @@
+data/
+cars_train_val/
+*.zip
+pytorch_prototyping/__pycache__/
+logs/
+.idea/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

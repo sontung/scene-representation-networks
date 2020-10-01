@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-
+import sys
 from torch.nn import functional as F
 import util
 
@@ -46,13 +46,7 @@ def reflect_vector_on_vector(vector_to_reflect, reflection_axis):
 
 
 def parse_intrinsics(intrinsics):
-    intrinsics = intrinsics.cuda()
-
-    fx = intrinsics[:, 0, 0]
-    fy = intrinsics[:, 1, 1]
-    cx = intrinsics[:, 0, 2]
-    cy = intrinsics[:, 1, 2]
-    return fx, fy, cx, cy
+    return 140, 140, 64, 64
 
 
 def expand_as(x, y):
@@ -66,19 +60,10 @@ def expand_as(x, y):
 
 
 def lift(x, y, z, intrinsics, homogeneous=False):
-    '''
-
-    :param self:
-    :param x: Shape (batch_size, num_points)
-    :param y:
-    :param z:
-    :param intrinsics:
-    :return:
-    '''
     fx, fy, cx, cy = parse_intrinsics(intrinsics)
 
-    x_lift = (x - expand_as(cx, x)) / expand_as(fx, x) * z
-    y_lift = (y - expand_as(cy, y)) / expand_as(fy, y) * z
+    x_lift = (x - torch.ones_like(x)*cx) / (torch.ones_like(x)*fx) * z
+    y_lift = (y - torch.ones_like(y)*cy) / (torch.ones_like(y)*fy) * z
 
     if homogeneous:
         return torch.stack((x_lift, y_lift, z, torch.ones_like(z).cuda()), dim=-1)
@@ -111,7 +96,7 @@ def world_from_xy_depth(xy, depth, cam2world, intrinsics):
 
     x_cam = xy[:, :, 0].view(batch_size, -1)
     y_cam = xy[:, :, 1].view(batch_size, -1)
-    z_cam = depth.view(batch_size, -1)
+    z_cam = depth.view(batch_size, -1)*-1
 
     pixel_points_cam = lift(x_cam, y_cam, z_cam, intrinsics=intrinsics, homogeneous=True)  # (batch_size, -1, 4)
 
@@ -120,8 +105,53 @@ def world_from_xy_depth(xy, depth, cam2world, intrinsics):
 
     world_coords = torch.bmm(cam2world, pixel_points_cam).permute(0, 2, 1)[:, :, :3]  # (batch_size, -1, 3)
 
+    # print(world_coords[0][11])
+    # print(xy[0][11])
+    # print(depth[0][11])
+    # print(cam2world[0])
+    # print(depth.size(), cam2world.size(), world_coords[0].size())
+
+    # print(world_from_depth2(xy[0][11], depth[0][11].item(), cam2world[0].cpu()))
+    # print(world_from_depth3(xy[0][11], depth[0][11].item(), cam2world[0].cpu()))
+
     return world_coords
 
+def world_from_depth3(pixel_coord, depth, ext_mat):
+    fx, fy, cx, cy = 140.0, 140.0, 64.0, 64.0
+    x, y = pixel_coord
+    z = -depth
+    x_lift = (x - cx) / fx * z
+    y_lift = (y - cy) / fy * z
+    return torch.mm(torch.tensor(ext_mat), torch.tensor([x_lift, y_lift, -depth, 1]).unsqueeze(1))
+
+def world_from_depth2(pixel_coord, depth, ext_mat):
+    p_x, p_y = pixel_coord
+    im_x, im_y = p_x/128, (128-p_y)/128
+    frame = [
+          [
+            -0.09142857044935226,
+            -0.09142857044935226,
+            0.20000000298023224
+          ],
+          [
+            -0.09142857044935226,
+            0.09142857044935226,
+            0.20000000298023224
+          ],
+          [
+            0.09142857044935226,
+            0.09142857044935226,
+            0.20000000298023224
+          ]
+        ]
+    frame = [(np.array(v) / (v[2] / depth)) for v in frame]
+    min_x, max_x = frame[1][0], frame[2][0]
+    min_y, max_y = frame[0][1], frame[1][1]
+
+    cx = im_x * (max_x - min_x) + min_x
+    cy = im_y * (max_y - min_y) + min_y
+    world = torch.mm(torch.tensor(ext_mat), torch.tensor([cx, cy, -depth, 1]).unsqueeze(1))
+    return world.squeeze()
 
 def project_point_on_line(projection_point, line_direction, point_on_line, dim):
     '''Projects a batch of points on a batch of lines as defined by their direction and a point on each line. '''
@@ -156,4 +186,13 @@ def depth_from_world(world_coords, cam2world):
     depth = points_cam[:, 2, :][:, :, None]  # (batch, num_samples, 1)
     return depth
 
+
+if __name__ == '__main__':
+    import json
+    with open('/home/sontung/thesis/photorealistic-blocksworld/blocks-4-3/scene/CLEVR_new_000000.json') as json_file:
+        data = json.load(json_file)
+    print(data["objects"][0]["location"])
+    print(data["objects"][0]["pixel_coords"])
+    print(world_from_depth2((35, 87), 14.700079917907715, data["objects"][0]["recon_data"]["matrix_world"]))
+    print(world_from_depth3((35, 87), 14.700079917907715, data["objects"][0]["recon_data"]["matrix_world"]))
 

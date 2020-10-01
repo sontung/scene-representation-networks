@@ -13,6 +13,7 @@ import custom_layers
 import geometry
 import hyperlayers
 
+import time
 
 class SRNsModel(nn.Module):
     def __init__(self,
@@ -260,11 +261,16 @@ class SRNsModel(nn.Module):
     def forward(self, input, z=None):
         self.logs = list() # log saves tensors that"ll receive summaries when model"s write_updates function is called
 
+        uv = np.mgrid[0:128, 0:128].astype(np.int32)
+        uv = torch.from_numpy(np.flip(uv, axis=0).copy()).long()
+        uv = uv.reshape(2, -1).transpose(1, 0)
+        uvs = torch.cat([uv.unsqueeze(0) for _ in range(input[0].size(0))])
+
         # Parse model input.
-        instance_idcs = input["instance_idx"].long().cuda()
-        pose = input["pose"].cuda()
-        intrinsics = input["intrinsics"].cuda()
-        uv = input["uv"].cuda().float()
+        instance_idcs = torch.ones(input[0].size(0)).long().cuda()
+        pose = input[0].cuda()
+        intrinsics = None
+        uv = uvs.cuda().float()
 
         if self.fit_single_srn:
             phi = self.phi
@@ -309,3 +315,28 @@ class SRNsModel(nn.Module):
             self.logs.append(("scalar", "embed_max", self.z.max(), 1))
 
         return novel_views, depth_maps
+
+    def return_world_coords(self, uvs,  input):
+        # uv = np.mgrid[0:128, 0:128].astype(np.int32)
+        # uv = torch.from_numpy(np.flip(uv, axis=0).copy()).long()
+        # uv = uv.reshape(2, -1).transpose(1, 0)
+        # uvs = torch.cat([uv.unsqueeze(0) for _ in range(input[0].size(0))])
+
+        # Parse model input.
+        instance_idcs = torch.ones(input[0].size(0)).long().cuda()
+        pose = input[0].cuda()
+        intrinsics = None
+        uv = uvs.cuda().float()
+
+        if self.fit_single_srn:
+            phi = self.phi
+        else:
+            self.z = self.latent_codes(instance_idcs)
+            phi = self.hyper_phi(self.z)  # Forward pass through hypernetwork yields a (callable) SRN.
+
+        # Raymarch SRN phi along rays defined by camera pose, intrinsics and uv coordinates.
+        points_xyz, depth_maps, log = self.ray_marcher(cam2world=pose,
+                                                       intrinsics=intrinsics,
+                                                       uv=uv,
+                                                       phi=phi)
+        return points_xyz
