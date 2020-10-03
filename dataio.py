@@ -258,16 +258,19 @@ class PBWDataset(torch.utils.data.Dataset):
 
     def collate_fn(self, batch):
         all_imgs, all_ext_mat, all_info = [], [], []
+        all_img_mat = []
         for i, (img, def_ext_mat, info) in enumerate(batch):
+            all_img_mat.append(img)
             img = img.reshape(3, -1).transpose(1, 0).unsqueeze(0)
             all_imgs.append(img)
             all_ext_mat.append(def_ext_mat.unsqueeze(0))
             all_info.append(info)
 
+        all_img_mat = torch.cat(all_img_mat)
         all_imgs = torch.cat(all_imgs)
         all_ext_mat = torch.cat(all_ext_mat)
 
-        return all_imgs, all_ext_mat, all_info
+        return all_imgs, all_ext_mat, all_info, all_img_mat
 
     def __getitem__(self, item):
         return self.data[self.keys[item]]

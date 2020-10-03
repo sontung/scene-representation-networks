@@ -110,7 +110,7 @@ class Raymarcher(nn.Module):
             state = self.lstm(v.view(-1, self.n_feature_channels), states[-1])
 
             if state[0].requires_grad:
-                state[0].register_hook(lambda x: x.clamp(min=-10, max=10))
+                state[0].register_hook(lambda x: x.clamp(min=-20, max=20))
 
             signed_distance = self.out_layer(state[0]).view(batch_size, num_samples, 1)
             new_world_coords = world_coords[-1] + ray_dirs * signed_distance
@@ -195,3 +195,85 @@ class DeepvoxelsRenderer(nn.Module):
         input = input.permute(0, 2, 1).view(batch_size, ch, self.img_sidelength, self.img_sidelength)
         out = self.net(input)
         return out.view(batch_size, 3, -1).permute(0, 2, 1)
+
+
+class Raymarcher2(nn.Module):
+    def __init__(self,
+                 num_feature_channels,
+                 raymarch_steps):
+        super().__init__()
+
+        self.n_feature_channels = num_feature_channels
+        self.steps = raymarch_steps
+
+        hidden_size = 16
+        self.lstm = nn.LSTMCell(input_size=self.n_feature_channels,
+                                hidden_size=hidden_size)
+
+        self.lstm.apply(init_recurrent_weights)
+        lstm_forget_gate_init(self.lstm)
+
+        self.out_layer = nn.Linear(hidden_size, 1)
+        self.counter = 0
+
+    def forward(self,
+                cam2world,  # pose
+                phi,
+                v_scene,
+                uv,
+                intrinsics):
+        batch_size, num_samples, _ = uv.shape
+        log = list()
+
+        ray_dirs = geometry.get_ray_directions(uv,
+                                               cam2world=cam2world,
+                                               intrinsics=intrinsics)
+
+        initial_depth = torch.zeros((batch_size, num_samples, 1)).normal_(mean=0.05, std=5e-4).cuda()
+        init_world_coords = geometry.world_from_xy_depth(uv,
+                                                         initial_depth,
+                                                         intrinsics=intrinsics,
+                                                         cam2world=cam2world)
+
+
+        world_coords = [init_world_coords]
+        depths = [initial_depth]
+        states = [None]
+
+        for step in range(self.steps):
+            v = phi(torch.cat([world_coords[-1], v_scene], dim=2))
+
+            state = self.lstm(v.view(-1, self.n_feature_channels), states[-1])
+
+            if state[0].requires_grad:
+                state[0].register_hook(lambda x: x.clamp(min=-20, max=20))
+
+            signed_distance = self.out_layer(state[0]).view(batch_size, num_samples, 1)
+            new_world_coords = world_coords[-1] + ray_dirs * signed_distance
+
+            states.append(state)
+            world_coords.append(new_world_coords)
+
+            depth = geometry.depth_from_world(world_coords[-1], cam2world)
+
+            # if self.training:
+            #     print("Raymarch step %d/%d: Min depth %0.6f, max depth %0.6f" %
+            #           (step, self.steps, depths[-1].min().detach().cpu().numpy(), depths[-1].max().detach().cpu().numpy()))
+            depths.append(depth)
+
+        if not self.counter % 100:
+            # Write tensorboard summary for each step of ray-marcher.
+            drawing_depths = torch.stack(depths, dim=0)[:, 0, :, :]
+            drawing_depths = util.lin2img(drawing_depths).repeat(1, 3, 1, 1)
+            log.append(('image', 'raycast_progress',
+                        torch.clamp(torchvision.utils.make_grid(drawing_depths, scale_each=False, normalize=True), 0.0,
+                                    5),
+                        100))
+
+            # Visualize residual step distance (i.e., the size of the final step)
+            fig = util.show_images([util.lin2img(signed_distance)[i, :, :, :].detach().cpu().numpy().squeeze()
+                                    for i in range(batch_size)])
+            log.append(('figure', 'stopping_distances', fig, 100))
+        self.counter += 1
+
+        return world_coords[-1], depths[-1], log

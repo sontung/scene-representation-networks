@@ -105,15 +105,6 @@ def world_from_xy_depth(xy, depth, cam2world, intrinsics):
 
     world_coords = torch.bmm(cam2world, pixel_points_cam).permute(0, 2, 1)[:, :, :3]  # (batch_size, -1, 3)
 
-    # print(world_coords[0][11])
-    # print(xy[0][11])
-    # print(depth[0][11])
-    # print(cam2world[0])
-    # print(depth.size(), cam2world.size(), world_coords[0].size())
-
-    # print(world_from_depth2(xy[0][11], depth[0][11].item(), cam2world[0].cpu()))
-    # print(world_from_depth3(xy[0][11], depth[0][11].item(), cam2world[0].cpu()))
-
     return world_coords
 
 def world_from_depth3(pixel_coord, depth, ext_mat):

@@ -11,7 +11,8 @@ from srns import *
 import util
 import time
 import sys
-
+from matplotlib import pyplot as plt
+from torchvision.utils import make_grid
 
 p = configargparse.ArgumentParser()
 p.add('-c', '--config_filepath', required=False, is_config_file=True, help='Path to config file.')
@@ -25,7 +26,7 @@ p.add_argument('--img_sidelengths', type=str, default='128', required=False,
 p.add_argument('--max_steps_per_img_sidelength', type=str, default="200000",
                help='Maximum number of optimization steps.'
                     'If comma-separated list, is understood as steps per image_sidelength.')
-p.add_argument('--batch_size_per_img_sidelength', type=str, default="3",
+p.add_argument('--batch_size_per_img_sidelength', type=str, default="8",
                help='Training batch size.'
                     'If comma-separated list, will train each image sidelength with respective batch size.')
 
@@ -118,13 +119,11 @@ def train():
                                     drop_last=True,
                                     collate_fn=val_dataset.collate_fn)
 
-    model = SRNsModel(num_instances=train_dataset.num_instances,
-                      latent_dim=opt.embedding_size,
-                      has_params=opt.has_params,
-                      fit_single_srn=opt.fit_single_srn,
-                      use_unet_renderer=opt.use_unet_renderer,
-                      tracing_steps=opt.tracing_steps,
-                      freeze_networks=opt.freeze_networks)
+    model = SRNsModel3(latent_dim=opt.embedding_size,
+                       has_params=opt.has_params,
+                       fit_single_srn=True,
+                       tracing_steps=opt.tracing_steps,
+                       freeze_networks=opt.freeze_networks)
     model.train()
     model.cuda()
     if opt.checkpoint_path is not None:
@@ -177,40 +176,24 @@ def train():
         # Loops over epochs.
         while True:
             for batch in train_dataloader:
-                rgb, ext_mat, info = batch
+                rgb, ext_mat, info, rgb_mat = batch
                 ground_truth = {"rgb": rgb}
-                model_input = (ext_mat, info) # color, pix coord, location, box
+                model_input = (ext_mat, rgb_mat, info) # color, pix coord, location, box
                 model_outputs = model(model_input)
                 optimizer.zero_grad()
 
-                dist_loss = model.get_image_loss(model_outputs, ground_truth)
-                reg_loss = model.get_regularization_loss(model_outputs, ground_truth)
-                latent_loss = model.get_latent_loss()
-
-                weighted_dist_loss = opt.l1_weight * dist_loss
-                weighted_reg_loss = opt.reg_weight * reg_loss
-                weighted_latent_loss = opt.kl_weight * latent_loss
-
-                total_loss = (weighted_dist_loss
-                              + weighted_reg_loss
-                              + weighted_latent_loss)
-
+                total_loss = model.get_image_loss(model_outputs, ground_truth)
                 total_loss.backward()
 
                 optimizer.step()
-                if iter % 1000:
-                    print("Iter %07d   Epoch %03d   L_img %0.4f   L_latent %0.4f   L_depth %0.4f" %
-                          (iter, epoch, weighted_dist_loss, weighted_latent_loss, weighted_reg_loss))
+                if iter % 100 == 0:
+                    print("Iter %07d   Epoch %03d   L_img %0.4f" %
+                          (iter, epoch, total_loss))
 
-                model.write_updates(writer, model_outputs, ground_truth, iter)
-                writer.add_scalar("scaled_distortion_loss", weighted_dist_loss, iter)
-                writer.add_scalar("scaled_regularization_loss", weighted_reg_loss, iter)
-                writer.add_scalar("scaled_latent_loss", weighted_latent_loss, iter)
-                writer.add_scalar("total_loss", total_loss, iter)
 
                 if iter % opt.steps_til_val == 0 and not opt.no_validation:
                     print("Running validation set...")
-                    acc = test(model, val_dataloader)
+                    acc = test(model, val_dataloader, str(iter))
                     print("Accuracy:", acc)
 
                 iter += 1
@@ -218,12 +201,6 @@ def train():
 
                 if iter == cum_max_steps:
                     break
-
-                if iter % opt.steps_til_ckpt == 0:
-                    util.custom_save(model,
-                                     os.path.join(ckpt_dir, 'epoch_%04d_iter_%06d.pth' % (epoch, iter)),
-                                     discriminator=None,
-                                     optimizer=optimizer)
 
             if iter == cum_max_steps:
                 break
@@ -234,14 +211,35 @@ def train():
                      discriminator=None,
                      optimizer=optimizer)
 
-def test(model_, loader_):
+def show2(im_, name, nrow):
+    import logging
+
+    logger = logging.getLogger()
+    old_level = logger.level
+    logger.setLevel(100)
+
+    fig_ = plt.figure(figsize=(15, 15))
+    for du3 in range(1, len(im_)+1):
+        plt.subplot(1, len(im_), du3)
+        plt.axis("off")
+        plt.imshow(np.transpose(make_grid(im_[du3-1], padding=5, normalize=False, pad_value=50, nrow=nrow),
+                                (1, 2, 0)))
+
+    plt.axis("off")
+    # plt.title("black: no action, red: 1-3, yellow: 3-1, green: 1-2, blue: 2-3, pink: 3-2, brown: 2-1")
+    plt.savefig(name, transparent=True, bbox_inches='tight')
+    plt.close(fig_)
+    logger.setLevel(old_level)
+
+def test(model_, loader_, name_):
     model_.eval()
     acc = 0.0
     nb_samples = 0
+    save_im = False
     with torch.no_grad():
         for batch in loader_:
-            rgb, ext_mat, info = batch
-            model_input = (ext_mat, info)  # color, pix coord, location, box
+            rgb, ext_mat, info, rgb_mat = batch
+            model_input = (ext_mat, rgb_mat, info)  # color, pix coord, location, box
 
             all_arrangements = []
             all_uv = []
@@ -270,6 +268,15 @@ def test(model_, loader_):
                 if true_rel == pred_rel:
                     acc +=1
                 nb_samples += 1
+
+            if not save_im:
+                save_im = True
+                rgb_pred = model_(model_input)
+                show2([
+                    rgb.reshape(rgb.size(0), 128, 128, 3).permute(0, 3, 1, 2).cpu(),
+                    rgb_pred.reshape(rgb.size(0), 128, 128, 3).permute(0, 3, 1, 2).cpu(),
+                ], "figures/test%s.png" % name_, 4)
+
     model_.train()
     return acc / nb_samples
 

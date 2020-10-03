@@ -3,6 +3,7 @@ cars_train_val/
 *.zip
 pytorch_prototyping/__pycache__/
 logs/
+figures/
 .idea/
 
 # Byte-compiled / optimized / DLL files
